@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+groq
+plotly
+kaleido
+pandas
+python-multipart
+pydantic-settings
+httpx
+pytest
+pytest-asyncio
