@@ -1,7 +1,6 @@
 import logging
 import sys
-from pydantic_settings import BaseSettings
-from pydantic import ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
 
 
@@ -28,10 +27,14 @@ def setup_logging() -> logging.Logger:
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    LLM_PROVIDER: Literal["ollama", "openai", "anthropic", "groq", "grok"] = "ollama"
+    GROQ_API_KEY: str = "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"
+    XAI_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.1-8b-instant"
+    OLLAMA_MODEL: str = ""
+    OLLAMA_BASE_URL: str = ""
     STORAGE_TYPE: Literal["local"] = "local"
     CHART_OUTPUT_PATH: str = "./charts"
     MAX_DATA_ROWS: int = 1000

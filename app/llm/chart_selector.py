@@ -16,22 +16,37 @@ import re
 from typing import Optional
 
 from fastapi import HTTPException
-from groq import Groq
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
+from langchain_community.chat_models import ChatOllama
 
 from app.config import settings
 from app.utils.color_palettes import get_palette, get_background
 
 logger = logging.getLogger("viz-agent")
 
-_client: Optional[Groq] = None
-
-
-def _get_client() -> Groq:
-    """Lazy-initialise the Groq client."""
-    global _client
-    if _client is None:
-        _client = Groq(api_key=settings.GROQ_API_KEY)
-    return _client
+def _get_llm(temperature=0.15):
+    """Return a sync Langchain LLM client."""
+    provider = getattr(settings, "LLM_PROVIDER", "ollama").lower()
+    
+    if getattr(settings, "XAI_API_KEY", "") and provider != "ollama":
+        provider = "grok"
+    elif getattr(settings, "GROQ_API_KEY", "") and provider != "ollama":
+        provider = "groq"
+        
+    if provider == "groq":
+        logger.info("Viz Agent LLM: Groq (LangChain)")
+        return ChatGroq(api_key=settings.GROQ_API_KEY, model_name=settings.GROQ_MODEL, temperature=temperature)
+    elif provider == "grok":
+        logger.info("Viz Agent LLM: Grok (LangChain)")
+        return ChatOpenAI(api_key=settings.XAI_API_KEY, base_url="https://api.x.ai/v1", model="grok-2-latest", temperature=temperature)
+    elif provider == "mcp":
+        logger.info("Viz Agent LLM: MCP")
+        return ChatOpenAI(api_key=getattr(settings, "OPENAI_API_KEY", ""), model_name="gpt-4o", temperature=temperature)
+    else:
+        logger.info("Viz Agent LLM: Ollama (LangChain)")
+        return ChatOllama(base_url=settings.OLLAMA_BASE_URL, model=settings.OLLAMA_MODEL, temperature=temperature)
 
 
 # ── Data Statistics Helper ────────────────────────────────────────────────────
@@ -234,7 +249,6 @@ def generate_spec(
     Generate an advanced, premium-quality Plotly JSON spec via Groq LLM.
     Includes data statistics and background configs for enterprise styling.
     """
-    client = _get_client()
     palette = get_palette(color_scheme)
     bg = get_background(color_scheme)
     sample = data_sample[:10]
@@ -255,21 +269,18 @@ def generate_spec(
         text_color=bg["text"],
     )
 
+    llm = _get_llm(temperature=0.15)
+    
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=user_prompt)
     ]
 
     # ── First attempt ──
     raw = ""
     try:
-        resp = client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=messages,
-            temperature=0.15,
-            max_tokens=4096,
-        )
-        raw = resp.choices[0].message.content.strip()
+        resp = llm.invoke(messages)
+        raw = resp.content.strip()
         spec = _parse_spec(raw)
         logger.info("generate_spec OK (chart_type=%s, scheme=%s)", chart_type, color_scheme)
         return spec
@@ -278,16 +289,13 @@ def generate_spec(
 
     # ── Retry with correction prompt ──
     try:
-        messages.append({"role": "assistant", "content": raw})
-        messages.append({"role": "user", "content": CORRECTION_PROMPT})
+        from langchain_core.messages import AIMessage
+        messages.append(AIMessage(content=raw))
+        messages.append(HumanMessage(content=CORRECTION_PROMPT))
 
-        resp = client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=4096,
-        )
-        raw_retry = resp.choices[0].message.content.strip()
+        llm_retry = _get_llm(temperature=0.0)
+        resp_retry = llm_retry.invoke(messages)
+        raw_retry = resp_retry.content.strip()
         spec = _parse_spec(raw_retry)
         logger.info("generate_spec OK on retry (chart_type=%s)", chart_type)
         return spec
@@ -309,7 +317,6 @@ def auto_select_insights(
     Ask Groq LLM to pick the most impactful visualizations for the dataset.
     Enriched with data statistics for smarter insight selection.
     """
-    client = _get_client()
     sample = data_sample[:10]
     stats = compute_data_stats(columns, data_sample)
 
@@ -321,17 +328,15 @@ def auto_select_insights(
         n_insights=n_insights,
     )
 
+    llm = _get_llm(temperature=0.25)
+    messages = [
+        SystemMessage(content=AUTO_INSIGHT_SYSTEM),
+        HumanMessage(content=user_prompt)
+    ]
+
     try:
-        resp = client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": AUTO_INSIGHT_SYSTEM},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.25,
-            max_tokens=2500,
-        )
-        raw = resp.choices[0].message.content.strip()
+        resp = llm.invoke(messages)
+        raw = resp.content.strip()
         insights = _parse_insight_array(raw)
         logger.info("auto_select_insights -> %d insights from LLM", len(insights))
         return insights[:n_insights]

@@ -9,3 +9,7 @@ pydantic-settings
 httpx
 pytest
 pytest-asyncio
+langchain-core
+langchain-groq
+langchain-openai
+langchain-community
