@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     AZURE_OPENAI_ENDPOINT: str = ""
     AZURE_OPENAI_DEPLOYMENT_NAME: str = ""
     AZURE_OPENAI_API_VERSION: str = "2024-02-15-preview"
-    STORAGE_TYPE: Literal["local"] = "local"
+    STORAGE_TYPE: Literal["local", "azure_blob"] = "local"
+    AZURE_STORAGE_CONNECTION_STRING: str = ""
+    AZURE_STORAGE_CONTAINER_NAME: str = "charts"
     CHART_OUTPUT_PATH: str = "./charts"
     MAX_DATA_ROWS: int = 1000
     PORT: int = 8003
