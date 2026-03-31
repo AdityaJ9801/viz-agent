@@ -255,58 +255,94 @@ async def run_task(payload: dict):
     """Orchestrator pipeline integration endpoint. Extracts tabular data from upstream context and generates a chart."""
     task_description = payload.get("task_description") or payload.get("query") or "Auto chart"
     context = payload.get("_context", {})
-    
+
     data_rows = None
     column_names = None
-    
-    # Locate dataset inside context dependencies
-    for dep_id, dep_data in context.items():
-        if isinstance(dep_data, dict) and "data_preview" in dep_data:
-            data_rows = dep_data["data_preview"]
+    context_columns = None  # ColumnProfile dicts from Context Agent
+
+    # Priority 1: SQL agent output has actual query result rows
+    for dep_data in context.values():
+        if isinstance(dep_data, dict) and "data_preview" in dep_data and "sql_generated" in dep_data:
+            data_rows = dep_data["data_preview"] or []
             column_names = dep_data.get("columns", [])
             break
-            
+
+    # Priority 2: Context Agent output — reconstruct rows from sample_values
     if data_rows is None:
-        raise HTTPException(status_code=400, detail="No tabular data found in _context (data_preview missing). Cannot visualize empty data.")
-        
+        for dep_data in context.values():
+            if isinstance(dep_data, dict) and "source_id" in dep_data and "columns" in dep_data:
+                context_columns = dep_data["columns"]  # list of ColumnProfile dicts
+                # Reconstruct rows by zipping sample_values across columns
+                if context_columns:
+                    max_samples = max(len(c.get("sample_values", [])) for c in context_columns)
+                    data_rows = []
+                    for i in range(max_samples):
+                        row = {}
+                        for col in context_columns:
+                            samples = col.get("sample_values", [])
+                            row[col["name"]] = samples[i] if i < len(samples) else None
+                        data_rows.append(row)
+                    column_names = context_columns
+                break
+
+    if not data_rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No tabular data found in _context. Ensure SQL or Context agent ran before Viz agent.",
+        )
+
+    # Map semantic types — Context Agent uses extended types, viz agent needs numeric/categorical/datetime
+    _NUMERIC_SEMANTICS = {"numeric", "quantity", "currency", "percentage", "integer", "float"}
+    _DATETIME_SEMANTICS = {"datetime", "date", "time", "timestamp"}
+
+    def _resolve_semantic(col_name: str, sample_val, semantic_type: Optional[str] = None) -> str:
+        if semantic_type:
+            s = semantic_type.lower()
+            if s in _NUMERIC_SEMANTICS:
+                return "numeric"
+            if s in _DATETIME_SEMANTICS:
+                return "datetime"
+            return "categorical"
+        # Fallback: infer from value
+        if isinstance(sample_val, (int, float)):
+            return "numeric"
+        if isinstance(sample_val, str) and any(k in col_name.lower() for k in ("date", "time", "at", "on")):
+            return "datetime"
+        return "categorical"
+
     col_profiles = []
-    if data_rows:
-        if column_names:
-            for col in column_names:
-                name = col if isinstance(col, str) else col.get("name", "unknown")
+    if column_names:
+        for col in column_names:
+            if isinstance(col, dict):
+                name = col.get("name", "unknown")
+                semantic_type = col.get("semantic_type") or col.get("semantic")
+                sample_val = (col.get("sample_values") or [None])[0]
+            else:
+                name = str(col)
+                semantic_type = None
                 sample_val = data_rows[0].get(name) if data_rows else None
-                semantic = "categorical"
-                unique_cnt = None
-                
-                if isinstance(sample_val, (int, float)):
-                    semantic = "numeric"
-                elif isinstance(sample_val, str) and ("date" in name.lower() or "time" in name.lower()):
-                    semantic = "datetime"
-                else:
-                    unique_cnt = len(set(str(r.get(name)) for r in data_rows if r.get(name) is not None))
-                    
-                col_profiles.append(ColumnProfile(name=name, semantic=semantic, unique=unique_cnt))
-        else:
-            for key, val in data_rows[0].items():
-                semantic = "numeric" if isinstance(val, (int, float)) else "categorical"
-                unique_cnt = len(set(str(r.get(key)) for r in data_rows if r.get(key) is not None)) if semantic == "categorical" else None
-                col_profiles.append(ColumnProfile(name=key, semantic=semantic, unique=unique_cnt))
+
+            semantic = _resolve_semantic(name, sample_val, semantic_type)
+            unique_cnt = None
+            if semantic == "categorical":
+                unique_cnt = len(set(str(r.get(name)) for r in data_rows if r.get(name) is not None))
+            col_profiles.append(ColumnProfile(name=name, semantic=semantic, unique=unique_cnt))
     else:
-        # Empty dataframe workaround
-        if column_names:
-            for col in column_names:
-                name = col if isinstance(col, str) else col.get("name", "unknown")
-                col_profiles.append(ColumnProfile(name=name, semantic="categorical"))
-                
+        # Derive columns from row keys
+        for key, val in (data_rows[0] if data_rows else {}).items():
+            semantic = _resolve_semantic(key, val)
+            unique_cnt = len(set(str(r.get(key)) for r in data_rows if r.get(key) is not None)) if semantic == "categorical" else None
+            col_profiles.append(ColumnProfile(name=key, semantic=semantic, unique=unique_cnt))
+
     chart_req = ChartRequest(
         task=task_description,
-        data=DataPayload(columns=col_profiles, rows=data_rows),
+        data=DataPayload(columns=col_profiles, rows=data_rows[:settings.MAX_DATA_ROWS]),
         color_scheme="vibrant",
         render_png=True,
         width=1000,
-        height=600
+        height=600,
     )
-    
+
     result = await generate_chart(chart_req)
     return result
 
